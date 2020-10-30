@@ -6,7 +6,9 @@
 import os
 import sys
 import shutil
-import time
+import io
+import zipfile
+import tempfile
 import logging
 import json
 from tornado.ioloop import IOLoop
@@ -311,10 +313,15 @@ class FileManager:
             raise self.server.error("Gcodes root not available")
         start_print = self._get_argument(request, 'print', "false") == "true"
         upload = self._get_upload_info(request, base_path)
+        fparts = os.path.splitext(upload['full_path'])
+        is_ufp = fparts[-1].lower() == ".ufp"
         # Verify that the operation can be done if attempting to upload a gcode
         try:
+            check_path = upload['full_path']
+            if is_ufp:
+                check_path = fparts[0] + ".gcode"
             print_ongoing = await self._handle_operation_check(
-                upload['full_path'])
+                check_path)
         except self.server.error as e:
             if e.status_code == 403:
                 raise self.server.error(
@@ -325,7 +332,7 @@ class FileManager:
                 start_print = False
         # Don't start if another print is currently in progress
         start_print = start_print and not print_ongoing
-        self._write_file(upload)
+        self._write_file(upload, is_ufp)
         if start_print:
             # Make a Klippy Request to "Start Print"
             klippy_apis = self.server.lookup_plugin('klippy_apis')
@@ -384,14 +391,55 @@ class FileManager:
             'dir_path': dir_path,
             'full_path': full_path}
 
-    def _write_file(self, upload):
-        try:
-            if upload['dir_path']:
-                os.makedirs(os.path.dirname(upload['full_path']), exist_ok=True)
-            with open(upload['full_path'], 'wb') as fh:
-                fh.write(upload['body'])
-        except Exception:
-            raise self.server.error("Unable to save file", 500)
+    def _write_file(self, upload, unzip_ufp=False):
+        if unzip_ufp:
+            try:
+                self._unzip_ufp(upload)
+            except Exception:
+                logging.exception("File Extraction Error")
+                raise self.server.error("Unable to extract file", 500)
+        else:
+            try:
+                if upload['dir_path']:
+                    os.makedirs(os.path.dirname(
+                        upload['full_path']), exist_ok=True)
+                with open(upload['full_path'], 'wb') as fh:
+                    fh.write(upload['body'])
+            except Exception:
+                raise self.server.error("Unable to save file", 500)
+
+    def _unzip_ufp(self, upload):
+        base_name_parts = os.path.splitext(
+            os.path.basename(upload['filename']))
+        working_dir = os.path.dirname(upload['full_path'])
+        thumb_dir = os.path.join(working_dir, "thumbs")
+        ufp_bytes = io.BytesIO(upload['body'])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with zipfile.ZipFile(ufp_bytes) as zf:
+                zf.extractall(tmpdir)
+            tmpGcPath = os.path.join(tmpdir, '3D/model.gcode')
+            tmpImgPath = os.path.join(tmpdir, 'Metadata/thumbnail.png')
+            if os.path.isfile(tmpGcPath):
+                gcName = base_name_parts[0] + ".gcode"
+                workingGcPath = os.path.join(working_dir, gcName)
+                shutil.copy2(tmpGcPath, workingGcPath)
+                # update upload file name to extracted gcode file
+                upload['filename'] = os.path.join(
+                    os.path.dirname(upload['filename']), gcName)
+            else:
+                raise self.server.error(
+                    f"UFP file {upload['filename']} does not "
+                    "contain a gcode file")
+            if os.path.isfile(tmpImgPath):
+                if not os.path.exists(thumb_dir):
+                    os.mkdir(thumb_dir)
+                imgName = base_name_parts[0] + ".png"
+                workingImgPath = os.path.join(thumb_dir, imgName)
+                try:
+                    shutil.copy2(tmpImgPath, workingImgPath)
+                except Exception:
+                    logging.exception(
+                        f"Unable to extract ufp thumbnail to {workingImgPath}")
 
     def get_file_list(self, format_list=False, base='gcodes'):
         try:
