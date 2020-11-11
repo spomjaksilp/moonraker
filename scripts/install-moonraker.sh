@@ -7,7 +7,7 @@ PYTHONDIR="${HOME}/moonraker-env"
 # Step 1:  Verify Klipper has been installed
 check_klipper()
 {
-    if [ "$(systemctl list-units --full -all -t service --no-legend | grep -F "klipper.service")" ]; then
+    if [ "$(systemctl list-units --full -all -t service --no-legend | grep -F "klipper.service")" ] || [ ! -z "$DOCKER" ]; then
         echo "Klipper service found!"
     else
         echo "Klipper service not found, please install Klipper first"
@@ -86,7 +86,7 @@ report_status()
 
 verify_ready()
 {
-    if [ "$EUID" -eq 0 ]; then
+    if [ "$EUID" -eq 0 ] || [ ! -z "$DOCKER" ]; then
         echo "This script must not run as root"
         exit -1
     fi
